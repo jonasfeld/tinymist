@@ -138,6 +138,14 @@ fn main() -> Result<()> {
     #[cfg(feature = "dhat-heap")]
     let _profiler = dhat::Profiler::new_heap();
 
+    // glibc keeps one arena per thread; freed memory in them is rarely returned,
+    // so RSS ratchets up with every edit. One arena keeps it bounded.
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    if std::env::var_os("MALLOC_ARENA_MAX").is_none() {
+        // SAFETY: mallopt is thread-safe and called before any thread is spawned.
+        unsafe { libc::mallopt(libc::M_ARENA_MAX, 1) };
+    }
+
     // Parses command line arguments
     let args = Args::parse();
     let cmd = args
