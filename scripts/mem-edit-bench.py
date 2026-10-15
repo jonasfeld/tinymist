@@ -7,7 +7,7 @@ Prints CSV (edits,rss_kb) and the least-squares slope over the second half.
 
 --truncate-to-bytes rewrites FILE in place: pass a COPY of your project as --root.
 """
-import argparse, json, os, queue, random, subprocess, sys, threading
+import argparse, json, os, queue, random, struct, subprocess, sys, threading
 from pathlib import Path
 
 
@@ -25,6 +25,33 @@ def slope(pts):
     return sum((x - mx) * (y - my) for x, y in pts) / den if den else 0.0
 
 
+def census(pid, probes):
+    """Count resident anonymous-heap copies of each probe (swapped-out pages are skipped)."""
+    page, counts = 4096, [0] * len(probes)
+    with open(f"/proc/{pid}/mem", "rb", 0) as mem, open(f"/proc/{pid}/pagemap", "rb", 0) as pm:
+        for ln in open(f"/proc/{pid}/maps"):
+            f = ln.split()
+            if (len(f) > 5 and f[5] != "[heap]") or "r" not in f[1] or f[1][3] == "s":
+                continue
+            a, b = (int(x, 16) for x in f[0].split("-"))
+            pm.seek(a // page * 8)
+            ents = struct.unpack(f"<{(b - a) // page}Q", pm.read((b - a) // page * 8))
+            i = 0
+            while i < len(ents):
+                j, here = i, ents[i] >> 63
+                while j < len(ents) and ents[j] >> 63 == here:
+                    j += 1
+                for off in range(i, j, 16384) if here else ():
+                    mem.seek(a + off * page)
+                    try:
+                        buf = mem.read((min(j, off + 16384) - off) * page)
+                    except OSError:
+                        break
+                    counts = [c + buf.count(q) for c, q in zip(counts, probes)]
+                i = j
+    return max(counts)
+
+
 def main():
     a = argparse.ArgumentParser()
     a.add_argument("--root", required=True)
@@ -35,6 +62,8 @@ def main():
     a.add_argument("--truncate-to-bytes", type=int)
     a.add_argument("--wait", type=float, default=2.0, help="max seconds to wait for diagnostics per edit")
     a.add_argument("--seed", type=int, default=1)
+    a.add_argument("--requests", default="", help="comma list sent after each edit, like an editor: tokens,color,symbol,highlight,completion")
+    a.add_argument("--census", action="store_true", help="also count document-text copies in the server heap (reads /proc/<pid>/mem)")
     args = a.parse_args()
 
     root = Path(args.root).resolve()
@@ -49,6 +78,7 @@ def main():
     p = subprocess.Popen([args.binary, "lsp"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                          stderr=subprocess.DEVNULL)
     diag = queue.Queue()
+    last_rid = {}
     lock = threading.Lock()
 
     def send(msg):
@@ -72,6 +102,8 @@ def main():
             if "method" in m and "id" in m:  # server request: reply with a benign result
                 res = [None] * len(m.get("params", {}).get("items", [])) if m["method"] == "workspace/configuration" else None
                 send({"jsonrpc": "2.0", "id": m["id"], "result": res})
+            elif isinstance(m.get("result"), dict) and "resultId" in m["result"]:
+                last_rid["id"] = m["result"]["resultId"]
             elif m.get("method") == "textDocument/publishDiagnostics":
                 diag.put(1)
 
@@ -97,19 +129,21 @@ def main():
 
     wait_diag(60)  # warmup: first compile
     rng = random.Random(args.seed)
-    ver, pending, pts = 1, None, []
+    ver, pending, pts, rid = 1, None, [], [1]
 
     def pos(off):
         pre = text[:off]
         line = pre.count("\n")
         return {"line": line, "character": len(pre[pre.rfind("\n") + 1:].encode("utf-16-le")) // 2}
 
-    print("edits,rss_kb")
+    lines = [l for l in text.encode().split(b"\n") if len(l) > 60]
+    probes = [lines[len(lines) * k // 4][:60] for k in (1, 2, 3)]
+    print("edits,rss_kb" + (",doc_copies" if args.census else ""))
     for i in range(args.edits + 1):
         if i % args.sample_every == 0:
             r = rss_kb(p.pid)
             pts.append((i, r))
-            print(f"{i},{r}", flush=True)
+            print(f"{i},{r}" + (f",{census(p.pid, probes)}" if args.census else ""), flush=True)
         if i == args.edits:
             break
         if pending is None:  # insert one char
@@ -127,6 +161,22 @@ def main():
         ver += 1
         note("textDocument/didChange", {"textDocument": {"uri": uri, "version": ver}, "contentChanges": [change]})
         wait_diag(args.wait)
+        td, at = {"uri": uri}, pos(min(max(pending if pending is not None else off, 0), len(text)))
+        for r in filter(None, args.requests.split(",")):
+            rid[0] += 1
+            if r == "tokens":
+                if "id" in last_rid:
+                    req(rid[0], "textDocument/semanticTokens/full/delta", {"textDocument": td, "previousResultId": last_rid["id"]})
+                else:
+                    req(rid[0], "textDocument/semanticTokens/full", {"textDocument": td})
+            elif r == "color":
+                req(rid[0], "textDocument/documentColor", {"textDocument": td})
+            elif r == "symbol":
+                req(rid[0], "textDocument/documentSymbol", {"textDocument": td})
+            elif r == "highlight":
+                req(rid[0], "textDocument/documentHighlight", {"textDocument": td, "position": at})
+            elif r == "completion":
+                req(rid[0], "textDocument/completion", {"textDocument": td, "position": at})
 
     half = [pt for pt in pts if pt[0] >= args.edits / 2]
     print(f"# doc_bytes={len(text.encode())} slope_second_half_kb_per_edit={slope(half):.4f}")
