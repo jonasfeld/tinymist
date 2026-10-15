@@ -336,6 +336,18 @@ impl SharedContext {
             true
         }
 
+        // Files of immutable packages are rediscovered for every revision
+        // otherwise, and each non-literal import site costs a full tracing
+        // compilation.
+        let immutable = matches!(
+            fid.root(),
+            typst::syntax::VirtualRoot::Package(spec) if spec.namespace != "local"
+        );
+        let cache = &self.analysis.caches.package_dependencies;
+        if immutable && let Some(hit) = cache.lock().get(&fid) {
+            return hit.clone();
+        }
+
         let Ok(source) = self.source_by_id(fid) else {
             return DependencyDiscovery {
                 dependencies: vec![],
@@ -370,10 +382,14 @@ impl SharedContext {
         });
         let mut dependencies: Vec<_> = dependencies.into_iter().collect();
         dependencies.sort_unstable_by_key(|dependency| dependency.into_raw().get());
-        DependencyDiscovery {
+        let discovery = DependencyDiscovery {
             dependencies,
             has_unresolved,
+        };
+        if immutable {
+            cache.lock().insert(fid, discovery.clone());
         }
+        discovery
     }
 
     fn walk_dependency_sites(node: &SyntaxNode, f: &mut impl FnMut(SyntaxKind, &SyntaxNode)) {

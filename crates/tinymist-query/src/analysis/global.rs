@@ -35,8 +35,8 @@ use typst_shim::eval::{Eval, eval_compat};
 use typst_shim::syntax::VirtualPathExt;
 
 use super::{
-    AnalysisComponent, ComponentCoordinator, DependencyAdmission, ExprStage, LspQuerySnapshot,
-    type_check_component,
+    AnalysisComponent, ComponentCoordinator, DependencyAdmission, DependencyDiscovery, ExprStage,
+    LspQuerySnapshot, type_check_component,
 };
 use crate::adt::revision::{RevisionLock, RevisionManager, RevisionManagerLike, RevisionSlot};
 use crate::analysis::prelude::*;
@@ -178,6 +178,7 @@ impl Analysis {
         self.caches.def_signatures.clear();
         self.caches.static_signatures.clear();
         self.caches.terms.clear();
+        self.caches.package_dependencies.lock().clear();
         *self.local_packages.lock() = OnceLock::default();
         self.tokens_caches.lock().clear();
         self.analysis_rev_cache.lock().clear();
@@ -1723,6 +1724,10 @@ pub struct AnalysisGlobalCaches {
     signatures: CacheMap<DeferredCompute<Option<Signature>>>,
     docstrings: CacheMap<DeferredCompute<Option<Arc<DocString>>>>,
     terms: CacheMap<(Value, Ty)>,
+    /// Dependency discovery results of files of immutable (non-`@local`)
+    /// packages, which never change while the server runs. Bounded by the
+    /// number of package files that are analyzed.
+    pub(super) package_dependencies: Arc<Mutex<FxHashMap<TypstFileId, DependencyDiscovery>>>,
 }
 
 /// A local (lsp request spanned) cache for all level of analysis results of a
