@@ -91,6 +91,9 @@ walkdir.workspace = true
 
 dapts.workspace = true
 
+[target.'cfg(all(target_os = "linux", target_env = "gnu"))'.dependencies]
+libc.workspace = true
+
 [features]
 default = [
     "cli",

@@ -6808,6 +6808,7 @@ dependencies = [
  "hyper-tungstenite",
  "hyper-util",
  "itertools 0.13.0",
+ "libc",
  "log",
  "lsp-types",
  "open",
