@@ -130,6 +130,8 @@ def main():
 
     half = [pt for pt in pts if pt[0] >= args.edits / 2]
     print(f"# doc_bytes={len(text.encode())} slope_second_half_kb_per_edit={slope(half):.4f}")
+    hwm = next(l for l in Path(f"/proc/{p.pid}/status").read_text().splitlines() if l.startswith("VmHWM:"))
+    print(f"# peak_{hwm.split()[0].lower()}_kb={hwm.split()[1]}")
     p.kill()
 
 
